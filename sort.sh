@@ -77,7 +77,7 @@ echo "Параметры: Режим=$MODE, Опция_Даты=$DATE_MODE" >> "
 current=0
 
 for file in "${files[@]}"; do
-    ((current++))
+    ((++current))
 
     # Извлекаем UNIX timestamp в зависимости от флага
     if [[ "$DATE_MODE" == "create" ]]; then
