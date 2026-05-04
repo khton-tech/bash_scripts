@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Утилита для сортировки файлов по дате создания или изменения.
-# Версия: Vanilla Bash + Ultra-Fast File Gathering
+# Версия: Vanilla Bash + Ultra-Fast File Gathering + Benchmark
 
 set -euo pipefail
 
@@ -111,18 +111,15 @@ script_name=$(basename "$0")
 echo -e "${BLUE}Собираю список файлов...${NC}"
 files=()
 
-# Потоковое чтение через find. Останавливается мгновенно, если достигнут лимит.
 while IFS= read -r -d $'\0' f; do
-    f="${f#./}" # Отрезаем ведущий ./
+    f="${f#./}" 
     
-    # Исключаем служебные файлы
     [[ "$f" == "$script_name" ]] && continue
     [[ "$f" == sort_log_*.txt ]] && continue
     [[ "$f" == backup_*.7z ]] && continue
 
     files+=("$f")
     
-    # Если задан лимит и мы его достигли — жестко прерываем поиск
     if [[ "$FILE_LIMIT" -gt 0 && "${#files[@]}" -ge "$FILE_LIMIT" ]]; then
         break
     fi
@@ -162,11 +159,14 @@ echo -e "${BLUE}🚀 Начинаем фасовку...${NC}"
 echo "" 
 echo "" 
 
-tput civis # Скрываем курсор
+tput civis
 
 current=0
 last_stat_time=0
 current_stats="$(get_stats)"
+
+# ЗАПУСК БЕНЧМАРКА
+bench_start=$(date +%s.%N)
 
 for file in "${files[@]}"; do
     ((++current))
@@ -206,10 +206,20 @@ for file in "${files[@]}"; do
     printf "\033[2A\033[K%s\n\033[K${GREEN}[%s%s] %d%% (%d/%d)${NC}\n" "$current_stats" "$bar" "$space" "$percent" "$current" "$total_files"
 done
 
-tput cnorm # Возвращаем курсор
+# ОСТАНОВКА БЕНЧМАРКА И ПОДСЧЕТ
+bench_end=$(date +%s.%N)
+total_time=$(awk "BEGIN {printf \"%.2f\", $bench_end - $bench_start}")
+avg_time=$(awk "BEGIN {printf \"%.5f\", $total_time / $total_files}")
+
+tput cnorm
 
 echo -e "\n--- Сортировка завершена: $(date) ---" >> "$LOG_FILE"
+echo "Общее время: ${total_time} сек" >> "$LOG_FILE"
+echo "Среднее время на файл: ${avg_time} сек" >> "$LOG_FILE"
 
 echo "----------------------------------------"
 echo -e "${GREEN}Готово! Обработано файлов: $total_files${NC}"
+echo -e "${YELLOW}⏱️  Общее время работы: ${total_time} секунд${NC}"
+echo -e "${YELLOW}⚡ Среднее время на 1 файл: ${avg_time} секунд${NC}"
+echo "----------------------------------------"
 echo -e "Подробности в логе: $LOG_FILE"
