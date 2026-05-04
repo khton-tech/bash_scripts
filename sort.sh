@@ -1,14 +1,13 @@
 #!/bin/bash
 #
 # Утилита для сортировки файлов по дате (Flat).
-# Версия: Brutal Fast + Limit (-n)
+# Версия: Brutal Fast + Limit (-n) + Set-E Bugfix
 
 set -euo pipefail
 
 TARGET_DIR="."
 FILE_LIMIT=0
 
-# Вернули парсинг аргументов
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -n|--files) FILE_LIMIT="${2:-0}"; shift ;;
@@ -31,10 +30,14 @@ declare -A dirs_cache
 while IFS= read -r -d $'\0' file_date && IFS= read -r -d $'\0' filepath; do
     filename="${filepath#./}"
     
-    [[ "$filename" == "$script_name" ]] && continue
+    if [[ "$filename" == "$script_name" ]]; then
+        continue
+    fi
 
     if [[ -z "${dirs_cache[$file_date]:-}" ]]; then
-        [[ ! -d "$file_date" ]] && mkdir -p "$file_date"
+        if [[ ! -d "$file_date" ]]; then
+            mkdir -p "$file_date"
+        fi
         dirs_cache[$file_date]=1
     fi
 
@@ -43,26 +46,33 @@ while IFS= read -r -d $'\0' file_date && IFS= read -r -d $'\0' filepath; do
     if [[ -e "$dest" ]]; then
         base="${filename%.*}"
         ext="${filename##*.}"
-        [[ "$base" == "$ext" ]] && ext="" || ext=".$ext"
+        
+        if [[ "$base" == "$ext" ]]; then
+            ext=""
+        else
+            ext=".$ext"
+        fi
         
         c=1
-        while [[ -e "$file_date/${base}_${c}${ext}" ]]; do ((c++)); done
+        while [[ -e "$file_date/${base}_${c}${ext}" ]]; do 
+            c=$((c + 1))
+        done
         dest="$file_date/${base}_${c}${ext}"
     fi
 
     mv "$filepath" "$dest"
-    ((count++))
+    
+    # Исправлено: безопасная математика, которая не возвращает код 1
+    count=$((count + 1))
 
     if (( count % 1000 == 0 )); then
         echo -ne "\r\033[0;33mОбраработано файлов:\033[0m $count..."
     fi
 
-    # Жесткий стоп по лимиту
     if [[ "$FILE_LIMIT" -gt 0 && "$count" -ge "$FILE_LIMIT" ]]; then
         break
     fi
 
-# 2>/dev/null нужен, чтобы find не ругался на "Broken pipe", когда мы делаем break
 done < <(find . -maxdepth 1 -type f -printf "%TY-%Tm-%Td\0%p\0" 2>/dev/null)
 
 bench_end=$(date +%s.%N)
