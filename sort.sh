@@ -116,7 +116,7 @@ if [[ $total_files -eq 0 ]]; then
 fi
 
 echo -e "${BLUE}Начинаю фасовку ($total_files файлов). Режим: $MODE, Дата: $DATE_MODE${NC}"
-if $DRY_RUN; echo -e "${YELLOW}!!! DRY-RUN: ФАЙЛЫ НЕ БУДУТ ПЕРЕМЕЩЕНЫ !!!${NC}"; fi
+if $DRY_RUN; then echo -e "${YELLOW}!!! DRY-RUN: ФАЙЛЫ НЕ БУДУТ ПЕРЕМЕЩЕНЫ !!!${NC}"; fi
 
 echo "--- Сортировка начата: $(date) ---" > "$LOG_FILE"
 current=0
