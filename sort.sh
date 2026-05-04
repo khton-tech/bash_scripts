@@ -36,18 +36,16 @@ usage() {
     echo "  -n, --files N     Лимит файлов"
     echo "  -b, --backup      Сделать 7z бекап"
     echo "  -d, --dry-run     Холостой запуск"
-    echo "  --sum             Мастер-хэш ДО сортировки"
-    echo "  --re-sum          Мастер-хэш ПОСЛЕ сортировки"
+    echo "  --sum             Мастер-хэш ВСЕХ файлов ДО сортировки (отдельно)"
+    echo "  --re-sum          Мастер-хэш ВСЕХ файлов ПОСЛЕ сортировки (отдельно)"
     echo "  -t, --target      Целевая директория (дефолт: .)"
     exit 1
 }
 
 # --- ПОЛУЧЕНИЕ МЕТРИК ---
 get_stats() {
-    # CPU: Берем LA за 1 минуту, это самый быстрый способ без запуска тяжелого top
     local load=$(cat /proc/loadavg | awk '{print $1}')
     local ram=$(free -m | awk '/Mem:/ {print $3"MB"}')
-    # ROM: Смотрим занятое место на текущем разделе
     local rom=$(df -h . | awk 'NR==2 {print $5}')
     echo "CPU Load: $load | RAM: $ram | ROM (Disk): $rom"
 }
@@ -63,8 +61,8 @@ run_tui() {
     local action_choice
     action_choice=$(whiptail --title "KHTON FILE SORTER" --menu "Выбери действие:" 15 60 4 \
         "1" "Сортировка файлов" \
-        "2" "Создать слепок мастер-хэша (--sum)" \
-        "3" "Сверить мастер-хэш (--re-sum)" \
+        "2" "Создать слепок мастер-хэша всей папки (--sum)" \
+        "3" "Сверить мастер-хэш всей папки (--re-sum)" \
         "4" "Выход" 3>&1 1>&2 2>&3) || exit 0
     
     case $action_choice in
@@ -130,30 +128,23 @@ fi
 cd "$TARGET_DIR" || { echo -e "${RED}Ошибка: Не удалось перейти в $TARGET_DIR${NC}"; exit 1; }
 script_name=$(basename "$0")
 
-# --- ФУНКЦИИ ХЭШИРОВАНИЯ С TUI ПОДДЕРЖКОЙ ---
+# --- ФУНКЦИИ ГЛОБАЛЬНОГО ХЭШИРОВАНИЯ (--sum / --re-sum) ---
 calc_master_hash() {
     find . -type f ! -name "$script_name" ! -name "sort_log_*.txt" ! -name "$CHECKSUM_FILE" ! -name "backup_*.7z" \
         -exec sha256sum {} + 2>/dev/null | awk '{print $1}' | sort | sha256sum | awk '{print $1}'
 }
 
 run_hash_with_ui() {
-    local task_name="$1"
-    local target_file="$2"
-    
+    local task_name="$1" target_file="$2"
     calc_master_hash > "$target_file" &
     local pid=$!
     local c=0
-
-    # Отключаем 'set -e' для безопасной проверки kill -0
     set +e
     while kill -0 $pid 2>/dev/null; do
         if $IS_TUI; then
             c=$(( (c + 5) % 100 ))
             local stats=$(get_stats)
-            echo "XXX"
-            echo "$c"
-            echo -e "${task_name}...\n$stats"
-            echo "XXX"
+            echo "XXX"; echo "$c"; echo -e "${task_name}...\n$stats"; echo "XXX"
         else
             printf "\r${BLUE}${task_name}... [Ожидание]${NC}"
         fi
@@ -164,34 +155,17 @@ run_hash_with_ui() {
 }
 
 if [[ "$ACTION" == "sum" ]]; then
-    if $IS_TUI; then
-        run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE" | whiptail --title "Мастер-Хэш" --gauge "Запуск..." 10 70 0
-        whiptail --title "Успех" --msgbox "Мастер-хэш сохранен!\n\nФайл: $CHECKSUM_FILE" 10 60
-    else
-        echo -e "${BLUE}Вычисляю мастер-хэш файлов...${NC}"
-        run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE"
-        echo -e "\n${GREEN}Готово! Сохранен в $CHECKSUM_FILE${NC}"
-    fi
+    if $IS_TUI; then run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE" | whiptail --title "Мастер-Хэш" --gauge "Запуск..." 10 70 0; whiptail --title "Успех" --msgbox "Мастер-хэш сохранен!\n\nФайл: $CHECKSUM_FILE" 10 60
+    else echo -e "${BLUE}Вычисляю мастер-хэш файлов...${NC}"; run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE"; echo -e "\n${GREEN}Готово! Сохранен в $CHECKSUM_FILE${NC}"; fi
     exit 0
 fi
 
 if [[ "$ACTION" == "resum" ]]; then
     [[ ! -f "$CHECKSUM_FILE" ]] && { echo -e "${RED}Ошибка: Файл $CHECKSUM_FILE не найден.${NC}"; exit 1; }
-    
-    old_hash=$(cat "$CHECKSUM_FILE")
-    tmp_hash=$(mktemp)
-
-    if $IS_TUI; then
-        run_hash_with_ui "Сверка слепка" "$tmp_hash" | whiptail --title "Проверка Хэша" --gauge "Анализ данных..." 10 70 0
-    else
-        echo -e "${BLUE}Сверяю мастер-хэш...${NC}"
-        run_hash_with_ui "Сверка слепка" "$tmp_hash"
-        echo ""
-    fi
-
-    new_hash=$(cat "$tmp_hash")
-    rm -f "$tmp_hash"
-
+    old_hash=$(cat "$CHECKSUM_FILE"); tmp_hash=$(mktemp)
+    if $IS_TUI; then run_hash_with_ui "Сверка слепка" "$tmp_hash" | whiptail --title "Проверка Хэша" --gauge "Анализ данных..." 10 70 0
+    else echo -e "${BLUE}Сверяю мастер-хэш...${NC}"; run_hash_with_ui "Сверка слепка" "$tmp_hash"; echo ""; fi
+    new_hash=$(cat "$tmp_hash"); rm -f "$tmp_hash"
     if [[ "$old_hash" == "$new_hash" ]]; then
         if $IS_TUI; then whiptail --title "УСПЕХ" --msgbox "Чек-суммы совпадают!\nВсе данные на месте и не повреждены." 10 60
         else echo -e "${GREEN}УСПЕХ: Чек-суммы совпадают!${NC}"; fi
@@ -228,32 +202,30 @@ fi
 if [[ "$CREATE_BACKUP" == true && "$DRY_RUN" == false ]]; then
     if ! command -v 7z &> /dev/null; then echo -e "${RED}Утилита 7z не найдена!${NC}"; exit 1; fi
     backup_file="backup_$(date +%Y%m%d_%H%M%S).7z"
-    
     run_backup_ui() {
         7z a -t7z -mx=9 "$backup_file" . -x!"$script_name" -x!"sort_log_*.txt" -x!"$CHECKSUM_FILE" -x!"backup_*.7z" > /dev/null &
-        local pid=$!
-        local c=0
-        set +e
+        local pid=$!; local c=0; set +e
         while kill -0 $pid 2>/dev/null; do
-            if $IS_TUI; then
-                c=$(( (c + 2) % 100 ))
-                local stats=$(get_stats)
-                echo "XXX"; echo "$c"; echo -e "Сжатие исходников в 7z...\n$stats"; echo "XXX"
-            else
-                printf "\r${BLUE}Создаю бекап... [Ожидание]${NC}"
-            fi
-            sleep 0.5
+            if $IS_TUI; then c=$(( (c + 2) % 100 )); local stats=$(get_stats); echo "XXX"; echo "$c"; echo -e "Сжатие исходников в 7z...\n$stats"; echo "XXX"
+            else printf "\r${BLUE}Создаю бекап... [Ожидание]${NC}"; fi; sleep 0.5
         done
-        set -e
-        wait $pid
+        set -e; wait $pid
     }
+    if $IS_TUI; then run_backup_ui | whiptail --title "Резервное копирование" --gauge "Подготовка..." 10 70 0
+    else run_backup_ui; echo -e "\n${GREEN}Бекап $backup_file создан!${NC}"; fi
+fi
 
+# --- ПРОВЕРКА ЦЕЛОСТНОСТИ: ХЭШ ДО ---
+DEST_PATHS_FILE=$(mktemp)
+PRE_SORT_HASH=""
+
+if [[ "$DRY_RUN" == false ]]; then
     if $IS_TUI; then
-        run_backup_ui | whiptail --title "Резервное копирование" --gauge "Подготовка..." 10 70 0
+        whiptail --title "Безопасность" --infobox "Снимаем слепок ${total_files} файлов ДО сортировки...\nПожалуйста, подождите." 10 60
     else
-        run_backup_ui
-        echo -e "\n${GREEN}Бекап $backup_file создан!${NC}"
+        echo -e "${BLUE}Снимаю слепок ${total_files} файлов ДО сортировки...${NC}"
     fi
+    PRE_SORT_HASH=$(printf "%s\0" "${files[@]}" | xargs -0 sha256sum 2>/dev/null | awk '{print $1}' | sort | sha256sum | awk '{print $1}')
 fi
 
 # --- ФУНКЦИЯ ЦИКЛА СОРТИРОВКИ ---
@@ -262,27 +234,18 @@ get_unique_filename() {
     [[ "$base" == "$ext" ]] && ext="" || ext=".$ext"
     local counter=1 new_name="$file"
     while [[ -e "$dir/$new_name" ]]; do
-        new_name="${base}_${counter}${ext}"
-        ((counter++))
+        new_name="${base}_${counter}${ext}"; ((counter++))
     done
     echo "$new_name"
 }
 
 run_sort_loop() {
-    local current=0
-    local last_stat_time=0
-    local current_stats=""
-
+    local current=0 last_stat_time=0 current_stats=""
     for file in "${files[@]}"; do
         ((++current))
         local percent=$((current * 100 / total_files))
-
-        # Обновляем системные статы раз в секунду
         local now=$(date +%s)
-        if (( now - last_stat_time >= 1 )); then
-            current_stats=$(get_stats)
-            last_stat_time=$now
-        fi
+        if (( now - last_stat_time >= 1 )); then current_stats=$(get_stats); last_stat_time=$now; fi
 
         if [[ "$DATE_MODE" == "create" ]]; then
             ts=$(stat -c %W "$file" 2>/dev/null || echo 0)
@@ -301,15 +264,14 @@ run_sort_loop() {
             echo "[DRY-RUN] $file -> $dest_path" >> "$LOG_FILE"
         else
             [[ ! -d "$dir_name" ]] && mkdir -p "$dir_name"
-            mv "$file" "$dest_path" && echo "[$(date '+%H:%M:%S')] OK: $file -> $dest_path" >> "$LOG_FILE"
+            if mv "$file" "$dest_path"; then
+                echo "[$(date '+%H:%M:%S')] OK: $file -> $dest_path" >> "$LOG_FILE"
+                printf "%s\0" "$dest_path" >> "$DEST_PATHS_FILE"
+            fi
         fi
 
-        # Вывод в пайп для whiptail или в консоль
         if $IS_TUI; then
-            echo "XXX"
-            echo "$percent"
-            echo -e "Файл: $current / $total_files ($percent%)\n$current_stats"
-            echo "XXX"
+            echo "XXX"; echo "$percent"; echo -e "Файл: $current / $total_files ($percent%)\n$current_stats"; echo "XXX"
         else
             local filled=$((percent / 2)); local empty=$((50 - filled))
             local bar=$(printf "%${filled}s" | tr ' ' '#'); local space=$(printf "%${empty}s" | tr ' ' '-')
@@ -322,11 +284,41 @@ echo "--- Сортировка начата: $(date) ---" > "$LOG_FILE"
 
 if $IS_TUI; then
     run_sort_loop | whiptail --title "Сортировка файлов" --gauge "Начинаем фасовку..." 10 70 0
-    whiptail --title "Готово" --msgbox "Фасовка завершена!\n\nЛог: $LOG_FILE" 10 60
 else
     echo -e "${BLUE}Начинаю фасовку ($total_files файлов)...${NC}"
     run_sort_loop
-    echo -e "\n${GREEN}Готово! Лог сохранен в: $LOG_FILE${NC}"
+    echo ""
 fi
 
+# --- ПРОВЕРКА ЦЕЛОСТНОСТИ: ХЭШ ПОСЛЕ ---
+INTEGRITY_STATUS=""
+if [[ "$DRY_RUN" == false ]]; then
+    if $IS_TUI; then
+        whiptail --title "Безопасность" --infobox "Сверяем слепок ПОСЛЕ сортировки...\nПожалуйста, подождите." 10 60
+    else
+        echo -e "${BLUE}Сверяю хэши файлов ПОСЛЕ сортировки...${NC}"
+    fi
+    POST_SORT_HASH=$(xargs -0 sha256sum 2>/dev/null < "$DEST_PATHS_FILE" | awk '{print $1}' | sort | sha256sum | awk '{print $1}')
+    
+    if [[ "$PRE_SORT_HASH" == "$POST_SORT_HASH" ]]; then
+        INTEGRITY_STATUS="УСПЕХ: Хэши совпали (100% целостность)."
+        echo "[$(date '+%H:%M:%S')] ЦЕЛОСТНОСТЬ OK: $PRE_SORT_HASH" >> "$LOG_FILE"
+    else
+        INTEGRITY_STATUS="ОШИБКА: Хэши НЕ совпали! (ДО: $PRE_SORT_HASH | ПОСЛЕ: $POST_SORT_HASH)"
+        echo "[$(date '+%H:%M:%S')] ОШИБКА ЦЕЛОСТНОСТИ: $PRE_SORT_HASH != $POST_SORT_HASH" >> "$LOG_FILE"
+    fi
+else
+    INTEGRITY_STATUS="Пропущено (Холостой запуск)."
+fi
+rm -f "$DEST_PATHS_FILE"
+
 echo -e "\n--- Сортировка завершена: $(date) ---" >> "$LOG_FILE"
+
+# --- ИТОГИ ---
+if $IS_TUI; then
+    whiptail --title "Готово" --msgbox "Операция завершена!\n\nЦелостность данных:\n$INTEGRITY_STATUS\n\nЛог сохранен в:\n$LOG_FILE" 15 70
+else
+    echo -e "${GREEN}Готово!${NC}"
+    if [[ "$INTEGRITY_STATUS" == *"ОШИБКА"* ]]; then echo -e "${RED}$INTEGRITY_STATUS${NC}"; else echo -e "${GREEN}$INTEGRITY_STATUS${NC}"; fi
+    echo -e "Лог сохранен в: $LOG_FILE"
+fi
