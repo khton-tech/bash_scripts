@@ -18,6 +18,7 @@ DATE_MODE="create"
 DRY_RUN=false
 CREATE_BACKUP=false
 FILE_LIMIT=0
+IS_TUI=false
 LOG_FILE="sort_log_$(date +%Y%m%d_%H%M%S).txt"
 CHECKSUM_FILE=".master_checksum"
 
@@ -27,28 +28,38 @@ usage() {
     echo -e "Использование: $0 [опции]"
     echo "Запуск БЕЗ аргументов откроет графический (TUI) интерфейс."
     echo ""
-    echo "Опции для консольного запуска:"
-    echo "  -f,  --flat        Плоская фасовка (ГГГГ-ММ-ДД)"
-    echo "  -r,  --recursive   Рекурсивная фасовка (ГГГГ/ММ/ДД)"
-    echo "  -dc, --date-create Сортировать по дате создания (по умолчанию)"
-    echo "  -de, --date-edit   Сортировать по дате изменения"
-    echo "  -n,  --files N     Ограничить кол-во файлов (например, --files 100)"
-    echo "  -b,  --backup      Сделать 7z бекап исходников перед сортировкой"
-    echo "  -d,  --dry-run     Холостой запуск (без изменений)"
-    echo "  --sum              Вычислить мастер-хэш файлов ДО сортировки"
-    echo "  --re-sum           Сверить мастер-хэш файлов ПОСЛЕ сортировки"
-    echo "  -t,  --target      Целевая директория (дефолт: текущая)"
+    echo "Опции:"
+    echo "  -f, --flat        Плоская фасовка (ГГГГ-ММ-ДД)"
+    echo "  -r, --recursive   Рекурсивная фасовка (ГГГГ/ММ/ДД)"
+    echo "  -dc, --date-create Сорт. по дате создания (по умолчанию)"
+    echo "  -de, --date-edit   Сорт. по дате изменения"
+    echo "  -n, --files N     Лимит файлов"
+    echo "  -b, --backup      Сделать 7z бекап"
+    echo "  -d, --dry-run     Холостой запуск"
+    echo "  --sum             Мастер-хэш ДО сортировки"
+    echo "  --re-sum          Мастер-хэш ПОСЛЕ сортировки"
+    echo "  -t, --target      Целевая директория (дефолт: .)"
     exit 1
+}
+
+# --- ПОЛУЧЕНИЕ МЕТРИК ---
+get_stats() {
+    # CPU: Берем LA за 1 минуту, это самый быстрый способ без запуска тяжелого top
+    local load=$(cat /proc/loadavg | awk '{print $1}')
+    local ram=$(free -m | awk '/Mem:/ {print $3"MB"}')
+    # ROM: Смотрим занятое место на текущем разделе
+    local rom=$(df -h . | awk 'NR==2 {print $5}')
+    echo "CPU Load: $load | RAM: $ram | ROM (Disk): $rom"
 }
 
 # --- ИНТЕРАКТИВНЫЙ РЕЖИМ (TUI) ---
 run_tui() {
+    IS_TUI=true
     if ! command -v whiptail &> /dev/null; then
         echo -e "${RED}Утилита whiptail не найдена! Установи пакет libnewt.${NC}"
         exit 1
     fi
 
-    # 1. Главное меню
     local action_choice
     action_choice=$(whiptail --title "KHTON FILE SORTER" --menu "Выбери действие:" 15 60 4 \
         "1" "Сортировка файлов" \
@@ -63,31 +74,23 @@ run_tui() {
         4) exit 0 ;;
     esac
 
-    # 2. Целевая директория
-    TARGET_DIR=$(whiptail --title "Целевая директория" --inputbox "Введите путь (по умолчанию текущая '.'):" 10 60 "." 3>&1 1>&2 2>&3) || exit 0
+    TARGET_DIR=$(whiptail --title "Целевая директория" --inputbox "Введите путь:" 10 60 "." 3>&1 1>&2 2>&3) || exit 0
 
-    # Если выбрана сортировка, спрашиваем детали
     if [[ "$ACTION" == "sort" ]]; then
-        # 3. Режим папок
         MODE=$(whiptail --title "Режим фасовки" --menu "Как группировать папки?" 15 60 2 \
             "flat" "Плоская (ГГГГ-ММ-ДД)" \
             "recursive" "Рекурсивная (ГГГГ/ММ/ДД)" 3>&1 1>&2 2>&3) || exit 0
 
-        # 4. Режим дат
         DATE_MODE=$(whiptail --title "Опции дат" --menu "Какую дату использовать?" 15 60 2 \
             "create" "Дата создания (btime/mtime)" \
             "edit" "Дата изменения (mtime)" 3>&1 1>&2 2>&3) || exit 0
 
-        # 5. Лимит файлов
         local limit_input
         limit_input=$(whiptail --title "Лимит" --inputbox "Кол-во файлов для обработки (0 = все):" 10 60 "0" 3>&1 1>&2 2>&3) || exit 0
-        if [[ "$limit_input" =~ ^[0-9]+$ ]]; then
-            FILE_LIMIT=$limit_input
-        fi
+        if [[ "$limit_input" =~ ^[0-9]+$ ]]; then FILE_LIMIT=$limit_input; fi
 
-        # 6. Чекбокс опций
         local options_choice
-        options_choice=$(whiptail --title "Безопасность" --checklist "Дополнительные опции (Пробел - выбор):" 15 60 2 \
+        options_choice=$(whiptail --title "Безопасность" --checklist "Дополнительные опции:" 15 60 2 \
             "BACKUP" "Создать 7z архив перед стартом" OFF \
             "DRY_RUN" "Холостой запуск (Dry-Run)" OFF 3>&1 1>&2 2>&3) || exit 0
         
@@ -120,57 +123,89 @@ else
     done
 fi
 
-# Проверка лимита на валидность (только числа)
 if [[ "$FILE_LIMIT" -ne 0 && ! "$FILE_LIMIT" =~ ^[0-9]+$ ]]; then
-    echo -e "${RED}Ошибка: Лимит файлов должен быть положительным числом.${NC}"
-    exit 1
+    echo -e "${RED}Ошибка: Лимит файлов должен быть числом.${NC}"; exit 1
 fi
 
 cd "$TARGET_DIR" || { echo -e "${RED}Ошибка: Не удалось перейти в $TARGET_DIR${NC}"; exit 1; }
 script_name=$(basename "$0")
 
-# Функция расчета единого мастер-хэша
+# --- ФУНКЦИИ ХЭШИРОВАНИЯ С TUI ПОДДЕРЖКОЙ ---
 calc_master_hash() {
-    find . -type f \
-        ! -name "$script_name" \
-        ! -name "sort_log_*.txt" \
-        ! -name "$CHECKSUM_FILE" \
-        ! -name "backup_*.7z" \
+    find . -type f ! -name "$script_name" ! -name "sort_log_*.txt" ! -name "$CHECKSUM_FILE" ! -name "backup_*.7z" \
         -exec sha256sum {} + 2>/dev/null | awk '{print $1}' | sort | sha256sum | awk '{print $1}'
 }
 
-# --- ЛОГИКА ХЭШИРОВАНИЯ ---
+run_hash_with_ui() {
+    local task_name="$1"
+    local target_file="$2"
+    
+    calc_master_hash > "$target_file" &
+    local pid=$!
+    local c=0
+
+    # Отключаем 'set -e' для безопасной проверки kill -0
+    set +e
+    while kill -0 $pid 2>/dev/null; do
+        if $IS_TUI; then
+            c=$(( (c + 5) % 100 ))
+            local stats=$(get_stats)
+            echo "XXX"
+            echo "$c"
+            echo -e "${task_name}...\n$stats"
+            echo "XXX"
+        else
+            printf "\r${BLUE}${task_name}... [Ожидание]${NC}"
+        fi
+        sleep 0.5
+    done
+    set -e
+    wait $pid
+}
+
 if [[ "$ACTION" == "sum" ]]; then
-    echo -e "${BLUE}Вычисляю мастер-хэш файлов в '$TARGET_DIR'... Это может занять время.${NC}"
-    calc_master_hash > "$CHECKSUM_FILE"
-    echo -e "${GREEN}Готово! Мастер-хэш сохранен в '$TARGET_DIR/$CHECKSUM_FILE'${NC}"
+    if $IS_TUI; then
+        run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE" | whiptail --title "Мастер-Хэш" --gauge "Запуск..." 10 70 0
+        whiptail --title "Успех" --msgbox "Мастер-хэш сохранен!\n\nФайл: $CHECKSUM_FILE" 10 60
+    else
+        echo -e "${BLUE}Вычисляю мастер-хэш файлов...${NC}"
+        run_hash_with_ui "Вычисление слепка" "$CHECKSUM_FILE"
+        echo -e "\n${GREEN}Готово! Сохранен в $CHECKSUM_FILE${NC}"
+    fi
     exit 0
 fi
 
 if [[ "$ACTION" == "resum" ]]; then
-    if [[ ! -f "$CHECKSUM_FILE" ]]; then
-        echo -e "${RED}Ошибка: Файл $CHECKSUM_FILE не найден. Сначала выполни --sum.${NC}"
-        exit 1
-    fi
-    echo -e "${BLUE}Сверяю мастер-хэш файлов в '$TARGET_DIR'...${NC}"
+    [[ ! -f "$CHECKSUM_FILE" ]] && { echo -e "${RED}Ошибка: Файл $CHECKSUM_FILE не найден.${NC}"; exit 1; }
+    
     old_hash=$(cat "$CHECKSUM_FILE")
-    new_hash=$(calc_master_hash)
-    
-    echo "Ожидалось: $old_hash"
-    echo "Получено:  $new_hash"
-    
+    tmp_hash=$(mktemp)
+
+    if $IS_TUI; then
+        run_hash_with_ui "Сверка слепка" "$tmp_hash" | whiptail --title "Проверка Хэша" --gauge "Анализ данных..." 10 70 0
+    else
+        echo -e "${BLUE}Сверяю мастер-хэш...${NC}"
+        run_hash_with_ui "Сверка слепка" "$tmp_hash"
+        echo ""
+    fi
+
+    new_hash=$(cat "$tmp_hash")
+    rm -f "$tmp_hash"
+
     if [[ "$old_hash" == "$new_hash" ]]; then
-        echo -e "${GREEN}УСПЕХ: Чек-суммы совпадают! Все данные на месте.${NC}"
+        if $IS_TUI; then whiptail --title "УСПЕХ" --msgbox "Чек-суммы совпадают!\nВсе данные на месте и не повреждены." 10 60
+        else echo -e "${GREEN}УСПЕХ: Чек-суммы совпадают!${NC}"; fi
         exit 0
     else
-        echo -e "${RED}КРИТИЧЕСКАЯ ОШИБКА: Чек-суммы НЕ СОВПАДАЮТ!${NC}"
+        if $IS_TUI; then whiptail --title "ОШИБКА" --msgbox "КРИТИЧЕСКАЯ ОШИБКА!\nЧек-суммы НЕ СОВПАДАЮТ!" 10 60
+        else echo -e "${RED}КРИТИЧЕСКАЯ ОШИБКА: Чек-суммы НЕ СОВПАДАЮТ!${NC}"; fi
         exit 1
     fi
 fi
 
-# --- ЛОГИКА СОРТИРОВКИ ---
-[[ -z "$MODE" ]] && { echo -e "${RED}Ошибка: Для фасовки выбери режим (-f или -r)${NC}"; exit 1; }
-[[ "$DRY_RUN" == false && ! -w . ]] && { echo -e "${RED}Ошибка: Нет прав на запись в $TARGET_DIR${NC}"; exit 1; }
+# --- ПОДГОТОВКА К СОРТИРОВКЕ ---
+[[ -z "$MODE" ]] && { echo -e "${RED}Ошибка: Не выбран режим (-f или -r)${NC}"; exit 1; }
+[[ "$DRY_RUN" == false && ! -w . ]] && { echo -e "${RED}Ошибка: Нет прав на запись${NC}"; exit 1; }
 
 shopt -s dotglob
 files=()
@@ -182,50 +217,50 @@ done
 shopt -u dotglob
 
 total_files=${#files[@]}
-if [[ $total_files -eq 0 ]]; then
-    echo -e "${BLUE}В директории нет файлов для сортировки.${NC}"
-    exit 0
-fi
+[[ $total_files -eq 0 ]] && { echo -e "${BLUE}Нет файлов для сортировки.${NC}"; exit 0; }
 
 if [[ "$FILE_LIMIT" -gt 0 && "$FILE_LIMIT" -lt "$total_files" ]]; then
-    echo -e "${YELLOW}Внимание: Установлен лимит. Будет обработано $FILE_LIMIT из $total_files файлов.${NC}"
     files=("${files[@]:0:$FILE_LIMIT}")
     total_files=${#files[@]}
 fi
 
-# Бекап
+# --- БЕКАП ---
 if [[ "$CREATE_BACKUP" == true && "$DRY_RUN" == false ]]; then
-    if ! command -v 7z &> /dev/null; then
-        echo -e "${RED}Ошибка: Утилита '7z' не установлена в системе.${NC}"
-        exit 1
-    fi
+    if ! command -v 7z &> /dev/null; then echo -e "${RED}Утилита 7z не найдена!${NC}"; exit 1; fi
     backup_file="backup_$(date +%Y%m%d_%H%M%S).7z"
-    echo -e "${BLUE}Создаю бекап исходников: $backup_file ...${NC}"
-    if 7z a -t7z -mx=9 "$backup_file" . -x!"$script_name" -x!"sort_log_*.txt" -x!"$CHECKSUM_FILE" -x!"backup_*.7z" > /dev/null; then
-        echo -e "${GREEN}Бекап успешно сохранен!${NC}"
+    
+    run_backup_ui() {
+        7z a -t7z -mx=9 "$backup_file" . -x!"$script_name" -x!"sort_log_*.txt" -x!"$CHECKSUM_FILE" -x!"backup_*.7z" > /dev/null &
+        local pid=$!
+        local c=0
+        set +e
+        while kill -0 $pid 2>/dev/null; do
+            if $IS_TUI; then
+                c=$(( (c + 2) % 100 ))
+                local stats=$(get_stats)
+                echo "XXX"; echo "$c"; echo -e "Сжатие исходников в 7z...\n$stats"; echo "XXX"
+            else
+                printf "\r${BLUE}Создаю бекап... [Ожидание]${NC}"
+            fi
+            sleep 0.5
+        done
+        set -e
+        wait $pid
+    }
+
+    if $IS_TUI; then
+        run_backup_ui | whiptail --title "Резервное копирование" --gauge "Подготовка..." 10 70 0
     else
-        echo -e "${RED}КРИТИЧЕСКАЯ ОШИБКА создания бекапа. Прерываю работу.${NC}"
-        exit 1
+        run_backup_ui
+        echo -e "\n${GREEN}Бекап $backup_file создан!${NC}"
     fi
-elif [[ "$CREATE_BACKUP" == true && "$DRY_RUN" == true ]]; then
-    echo -e "${YELLOW}[DRY-RUN] Будет создан 7z архив текущей директории перед сортировкой.${NC}"
 fi
 
-echo -e "${BLUE}Начинаю фасовку ($total_files файлов). Режим: $MODE, Дата: $DATE_MODE${NC}"
-if $DRY_RUN; then echo -e "${YELLOW}!!! DRY-RUN: ФАЙЛЫ НЕ БУДУТ ПЕРЕМЕЩЕНЫ !!!${NC}"; fi
-
-echo "--- Сортировка начата: $(date) ---" > "$LOG_FILE"
-current=0
-
+# --- ФУНКЦИЯ ЦИКЛА СОРТИРОВКИ ---
 get_unique_filename() {
-    local dir="$1"
-    local file="$2"
-    local base="${file%.*}"
-    local ext="${file##*.}"
+    local dir="$1" file="$2" base="${2%.*}" ext="${2##*.}"
     [[ "$base" == "$ext" ]] && ext="" || ext=".$ext"
-    
-    local counter=1
-    local new_name="$file"
+    local counter=1 new_name="$file"
     while [[ -e "$dir/$new_name" ]]; do
         new_name="${base}_${counter}${ext}"
         ((counter++))
@@ -233,45 +268,65 @@ get_unique_filename() {
     echo "$new_name"
 }
 
-for file in "${files[@]}"; do
-    ((++current))
+run_sort_loop() {
+    local current=0
+    local last_stat_time=0
+    local current_stats=""
 
-    if [[ "$DATE_MODE" == "create" ]]; then
-        ts=$(stat -c %W "$file" 2>/dev/null || echo 0)
-        if [[ "$ts" == "0" || "$ts" == "-" ]]; then
+    for file in "${files[@]}"; do
+        ((++current))
+        local percent=$((current * 100 / total_files))
+
+        # Обновляем системные статы раз в секунду
+        local now=$(date +%s)
+        if (( now - last_stat_time >= 1 )); then
+            current_stats=$(get_stats)
+            last_stat_time=$now
+        fi
+
+        if [[ "$DATE_MODE" == "create" ]]; then
+            ts=$(stat -c %W "$file" 2>/dev/null || echo 0)
+            [[ "$ts" == "0" || "$ts" == "-" ]] && ts=$(stat -c %Y "$file")
+        else
             ts=$(stat -c %Y "$file")
         fi
-    else
-        ts=$(stat -c %Y "$file")
-    fi
 
-    if [[ "$MODE" == "flat" ]]; then
-        dir_name=$(date -d "@$ts" "+%Y-%m-%d")
-    else
-        dir_name=$(date -d "@$ts" "+%Y/%m/%d")
-    fi
+        if [[ "$MODE" == "flat" ]]; then dir_name=$(date -d "@$ts" "+%Y-%m-%d")
+        else dir_name=$(date -d "@$ts" "+%Y/%m/%d"); fi
 
-    dest_filename=$(get_unique_filename "$dir_name" "$file")
-    dest_path="$dir_name/$dest_filename"
+        dest_filename=$(get_unique_filename "$dir_name" "$file")
+        dest_path="$dir_name/$dest_filename"
 
-    if $DRY_RUN; then
-        echo "[DRY-RUN] Перемещение: '$file' -> '$dest_path'" >> "$LOG_FILE"
-    else
-        [[ ! -d "$dir_name" ]] && mkdir -p "$dir_name"
-        if mv "$file" "$dest_path"; then
-            echo "[$(date '+%H:%M:%S')] Перемещен: '$file' -> '$dest_path'" >> "$LOG_FILE"
+        if $DRY_RUN; then
+            echo "[DRY-RUN] $file -> $dest_path" >> "$LOG_FILE"
         else
-            echo "[$(date '+%H:%M:%S')] ОШИБКА: '$file'" >> "$LOG_FILE"
+            [[ ! -d "$dir_name" ]] && mkdir -p "$dir_name"
+            mv "$file" "$dest_path" && echo "[$(date '+%H:%M:%S')] OK: $file -> $dest_path" >> "$LOG_FILE"
         fi
-    fi
 
-    percent=$((current * 100 / total_files))
-    filled=$((percent / 2))
-    empty=$((50 - filled))
-    bar=$(printf "%${filled}s" | tr ' ' '#')
-    space=$(printf "%${empty}s" | tr ' ' '-')
-    printf "\r${GREEN}[%s%s] %d%% (%d/%d)${NC}" "$bar" "$space" "$percent" "$current" "$total_files"
-done
+        # Вывод в пайп для whiptail или в консоль
+        if $IS_TUI; then
+            echo "XXX"
+            echo "$percent"
+            echo -e "Файл: $current / $total_files ($percent%)\n$current_stats"
+            echo "XXX"
+        else
+            local filled=$((percent / 2)); local empty=$((50 - filled))
+            local bar=$(printf "%${filled}s" | tr ' ' '#'); local space=$(printf "%${empty}s" | tr ' ' '-')
+            printf "\r${GREEN}[%s%s] %d%% (%d/%d)${NC}" "$bar" "$space" "$percent" "$current" "$total_files"
+        fi
+    done
+}
+
+echo "--- Сортировка начата: $(date) ---" > "$LOG_FILE"
+
+if $IS_TUI; then
+    run_sort_loop | whiptail --title "Сортировка файлов" --gauge "Начинаем фасовку..." 10 70 0
+    whiptail --title "Готово" --msgbox "Фасовка завершена!\n\nЛог: $LOG_FILE" 10 60
+else
+    echo -e "${BLUE}Начинаю фасовку ($total_files файлов)...${NC}"
+    run_sort_loop
+    echo -e "\n${GREEN}Готово! Лог сохранен в: $LOG_FILE${NC}"
+fi
 
 echo -e "\n--- Сортировка завершена: $(date) ---" >> "$LOG_FILE"
-printf "\n${GREEN}Готово! Лог: %s${NC}\n" "$LOG_FILE"
